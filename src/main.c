@@ -2,16 +2,24 @@
 #include <SDL/SDL.h>
 #include <SDL/SDL_gfxPrimitives.h>
 #include <time.h>
+#include <pthread.h>
+#include "mpi.h"
 
 #define WIDTH 1024
 #define HEIGHT 1024
 #define DEPTH 32
 
-#define FPS 1000
+#define FPS 1
 
-#define DW 1000
-#define DH 1000
+#define DW 100
+#define DH 100
 #define CELL_D 2
+
+#define NODES_X 4
+#define NODES_Y 4
+
+#define VISUALIZATION 1
+#define WRITE_STATS 0
 
 typedef struct {
 	int status;
@@ -23,7 +31,15 @@ typedef struct {
 cell *grid[DW][DH];
 cell *grid_copy[DW][DH];
 
-int rank;
+int wall_x, wall_y;
+
+int get_status(int x, int y)
+{
+	if((x > (wall_x * DW) && x < (wall_x * DW + DW)) && (y > (wall_y * DH) && y < (wall_y * DH + DH)))
+	{
+		return grid[x - wall_x * DW][y - wall_y * DH]->status;
+	}
+}
 
 void write_stats(FILE *file)
 {
@@ -124,56 +140,58 @@ void get_neighbors(int i, int j, cell **neighbors)
 {
 	int index = 0;
 
-	if(i != 0 && grid[i - 1][j]->status == 1)
+	if(i != 0 && get_status(i-1, j) == 1)
 	{
 		neighbors[index] = grid[i - 1][j];
 		index++;
 	}
 
-	if(j != 0 && grid[i][j - 1]->status == 1)
+	if(j != 0 && get_status(i, j-1) == 1)
 	{
 		neighbors[index] = grid[i][j - 1];
 		index++;
 	}
 
-	if(j != 0 && i != 0 && grid[i - 1][j - 1]->status == 1)
+	if(j != 0 && i != 0 && get_status(i-1, j-1) == 1)
 	{
 		neighbors[index] = grid[i - 1][j - 1];
 		index++;
 	}
 
-	if(i != DW - 1 && grid[i + 1][j]->status == 1)
+	if(i != DW - 1 && get_status(i+1, j) == 1)
 	{
 		neighbors[index] = grid[i + 1][j];
 		index++;
 	}
 
-	if(j != DH - 1 && grid[i][j + 1]->status == 1)
+	if(j != DH - 1 && get_status(i, j+1) == 1)
 	{
 		neighbors[index] = grid[i][j + 1];
 		index++;
 	}
 
-	if(i != DW - 1 && j != DH - 1 && grid[i + 1][j + 1]->status == 1)
+	if(i != DW - 1 && j != DH - 1 && get_status(i+1, j+1) == 1)
 	{
 		neighbors[index] = grid[i + 1][j + 1];
 		index++;
 	}
 
-	if(i != 0 && j != DH - 1 && grid[i - 1][j + 1]->status == 1)
+	if(i != 0 && j != DH - 1 && get_status(i-1, j+1) == 1)
 	{
 		neighbors[index] = grid[i - 1][j + 1];
 		index++;
 	}
 
-	if(i != DW - 1 && j != 0 && grid[i + 1][j - 1]->status == 1)
+	if(i != DW - 1 && j != 0 && get_status(i+1, j-1) == 1)
 	{
 		neighbors[index] = grid[i + 1][j - 1];
 		index++;
 	}
 }
 
-void advance() {
+
+void advance()
+{
 	int live_neighbors;
 
 	for(int i = 0; i < DW; i++)
@@ -244,32 +262,73 @@ void advance() {
 	}
 }
 
+void *listener()
+{
+	int x, y, cell_status, cell_allele1, cell_allele2;
+	MPI_Status status;
+
+	while(1)
+	{
+		MPI_Recv(&x, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		MPI_Recv(&y, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+		cell_status = grid[x][y]->status;
+		cell_allele1 = grid[x][y]->allele1;
+		cell_allele2 = grid[x][y]->allele2;
+
+		MPI_Send(&cell_status, 1, MPI_INT, status.MPI_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD);
+		MPI_Send(&cell_allele1, 1, MPI_INT, status.MPI_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD);
+		MPI_Send(&cell_allele2, 1, MPI_INT, status.MPI_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD);
+	}
+}
+
+
+
 int main(int argc, char *argv[])
 {
 	srand((unsigned int)time(NULL));
 
-	FILE *file = fopen("stats.csv", "w");
-	fprintf(file, "hdom, het, hrec\n");
-
 	// ///////////////
-	// Initialize SDL
+	// Initialize MPI
 	// ///////////////
-	/*
-	SDL_Surface *screen;
-	SDL_Event event;
+	int nodes, rank, rc;
 
-	int quit = 0;
-	int frame = 0;
+	rc = MPI_Init(&argc, &argv);
 
-	if(SDL_Init(SDL_INIT_VIDEO) < 0)
-		return 0;
-
-	if(!(screen = SDL_SetVideoMode(WIDTH, HEIGHT, DEPTH, SDL_HWSURFACE)))
+	if(rc != MPI_SUCCESS)
 	{
-		SDL_Quit();
-		return 1;
+		printf("There was an error initializing the MPI program; aborting.\n");
+		MPI_Abort(MPI_COMM_WORLD, rc);
 	}
-	*/
+
+	//
+	// Get number of nodes and our rank
+	// 
+	MPI_Comm_size(MPI_COMM_WORLD, &nodes);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+	wall_x = rank % NODES_X;
+	wall_y = rank / NODES_Y;
+
+	printf("Node %i of %i. I am at location %i, %i on the wall.\n", rank, nodes, wall_x, wall_y);
+
+	// 
+	// Initialize the listener
+	//
+	pthread_t listener_thread;
+	pthread_create(&listener_thread, NULL, listener, NULL);
+
+
+
+	#if WRITE_STATS == 1
+		// ///////////////////////////
+		// Initialize Statistics File
+		// ///////////////////////////
+		FILE *file = fopen("stats.csv", "w");
+		fprintf(file, "hdom, het, hrec\n");
+	#endif
+
+	
 
 	// Initialize the grid
 	for(int i = 0; i < DW; i++)
@@ -335,9 +394,6 @@ int main(int argc, char *argv[])
 
 
 	return 0;
-	*/
-
-	//int t_prev = SDL_GetTicks();
 
 	int generation = 0;
 
@@ -353,37 +409,66 @@ int main(int argc, char *argv[])
 			printf("%i\n", generation);
 		}
 	}
-
-	/*
-	while(!quit)
-	{
-		int t = SDL_GetTicks();
-
-		if((t - t_prev) > 1000/FPS)
-		{
-			write_stats(file);
-
-			draw(screen);
-			advance();
-
-			t_prev = t;
-		}
-
-		while(SDL_PollEvent(&event))
-		{
-			switch(event.type)
-			{
-				case SDL_QUIT:
-					quit = 1;
-					break;
-			}
-		}
-	}
 	*/
 
-	fclose(file);
+	#if VISUALIZATION == 1
+		// ///////////////
+		// Initialize SDL
+		// ///////////////
+		SDL_Surface *screen;
+		SDL_Event event;
 
-	SDL_Quit();
+		int quit = 0;
+		int frame = 0;
+
+		if(SDL_Init(SDL_INIT_VIDEO) < 0)
+			return 0;
+
+		if(!(screen = SDL_SetVideoMode(WIDTH, HEIGHT, DEPTH, SDL_HWSURFACE)))
+		{
+			SDL_Quit();
+			return 1;
+		}
+
+		int t_prev = SDL_GetTicks();
+
+		while(quit == 0)
+		{
+			int t = SDL_GetTicks();
+
+			if((t - t_prev) > 1000/FPS)
+			{
+				#if WRITE_STATS == 1
+					write_stats(file);
+				#endif
+
+				draw(screen);
+				advance();
+
+				t_prev = t;
+			}
+
+			while(SDL_PollEvent(&event))
+			{
+				switch(event.type)
+				{
+					case SDL_QUIT:
+						quit = 1;
+						break;
+				}
+			}
+		}
+	#endif
+
+	pthread_exit(NULL);
+
+	#if WRITE_STATS == 1
+		fclose(file);
+	#endif
+
+	#if VISUALIZATION == 1
+		SDL_Quit();
+	#endif
 
 	return 0;
 }
